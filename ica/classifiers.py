@@ -5,6 +5,7 @@ import scipy.sparse as sp
 
 
 def get_class(kls):
+
     parts = kls.split('.')
     module = ".".join(parts[:-1])
     md = __import__(module)
@@ -112,6 +113,21 @@ class RelationalClassifier(Classifier):
             conditional_map[graph.node_list[indices[x]]] = pred[x]
         return conditional_map
 
+    def predict_proba(self, graph, test_indices, conditional_map=None):
+        features = []
+        aggregates = []
+
+        for i in test_indices:
+            features.append(graph.node_list[i].feature_vector)
+            aggregates.append(sp.csr_matrix(self.aggregator.aggregate(graph,
+                                                                      graph.node_list[i],
+                                                                      conditional_map), dtype=np.float64))
+        features = sp.vstack(features)
+        features = sp.csr_matrix(features, dtype=np.float64)
+        aggregates = sp.vstack(aggregates)
+        features = sp.hstack([features, aggregates])
+
+        return self.clf.predict(features), self.clf.predict_proba(features).reshape(-1)
 
 class ICA(Classifier):
     def __init__(self, local_classifier, relational_classifier, bootstrap, max_iteration=10):
@@ -131,18 +147,32 @@ class ICA(Classifier):
                                                          predictclf, eval_indices)
 
         relation_predict = []
+        relation_probs = []
         temp = []
+        dict_probs = {}
         for iter in range(self.max_iteration):
-            for x in eval_indices:
+            for ii, x in enumerate(eval_indices):
                 temp.append(x)
-                rltn_pred = list(self.relational_classifier.predict(graph, temp, conditional_node_to_label_map))
-                conditional_node_to_label_map = self.cond_mp_upd(graph, conditional_node_to_label_map, rltn_pred, temp)
+                if iter == self.max_iteration - 1:
+                    rltn_pred, rltn_prob = self.relational_classifier.predict_proba(graph, temp, conditional_node_to_label_map)
+                    conditional_node_to_label_map = self.cond_mp_upd(graph, conditional_node_to_label_map, rltn_pred, temp)
+                    dict_probs = self.cond_mp_upd_(graph, dict_probs, rltn_prob, temp)
+                else:
+                    rltn_pred = list(self.relational_classifier.predict(graph, temp, conditional_node_to_label_map))
+                    conditional_node_to_label_map = self.cond_mp_upd(graph, conditional_node_to_label_map, rltn_pred, temp)
                 temp.remove(x)
+
         for ti in test_indices:
             relation_predict.append(conditional_node_to_label_map[graph.node_list[ti]])
-        return relation_predict
+            relation_probs.append(dict_probs[graph.node_list[ti]])
+        return relation_predict, np.array(relation_probs)
 
     def cond_mp_upd(self, graph, conditional_map, pred, indices):
         for x in range(len(pred)):
             conditional_map[graph.node_list[indices[x]]] = pred[x]
+        return conditional_map
+
+    def cond_mp_upd_(self, graph, conditional_map, pred, indices):
+        assert len(indices) == 1, 'Length must be one!'
+        conditional_map[graph.node_list[indices[0]]] = pred
         return conditional_map
